@@ -1,0 +1,27 @@
+# Binarios y ejecutables descargados en tiempo de ejecución
+bin/
+*.exe
+*.zip
+*.tar.gz
+
+# Caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Archivos de música descargados de prueba
+*.m4a
+*.mp3
+*.wav
+*.webm
+*.mp4
+Musica_Centro/
+test_*/
+
+# Archivos de sistema e IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
