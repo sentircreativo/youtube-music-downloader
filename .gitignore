@@ -19,6 +19,8 @@ __pycache__/
 *.mp4
 Musica_Centro/
 test_*/
+scratch/
+test_*.py
 
 # Archivos de sistema e IDE
 .vscode/

@@ -21,9 +21,9 @@ def get_base_ydl_opts(cookie_source=None, cookie_file=None):
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
-        'socket_timeout': 30,
-        'retries': 15,
-        'fragment_retries': 15,
+        'socket_timeout': 15,
+        'retries': 3,
+        'fragment_retries': 3,
         'file_access_retries': 5,
         'legacy_server_connect': True,
         'http_headers': {
@@ -121,6 +121,154 @@ def get_url_info(url, cookie_source=None, cookie_file=None):
                 }
         except Exception as e:
             return {'error': str(e)}
+
+def fetch_user_or_channel_videos(user_input, max_results=30, cookie_source=None, cookie_file=None):
+    """Obtiene la lista de videos de un usuario o canal de YouTube."""
+    query = user_input.strip()
+    if not query:
+        return {'channel_name': '', 'videos': [], 'error': 'Entrada vacía'}
+    
+    # Determinar la URL objetivo
+    if query.startswith('http://') or query.startswith('https://'):
+        target_url = query
+        if '/videos' not in target_url and ('/@' in target_url or '/channel/' in target_url or '/c/' in target_url or '/user/' in target_url):
+            target_url = target_url.rstrip('/') + '/videos'
+    elif query.startswith('@'):
+        target_url = f"https://www.youtube.com/{query}/videos"
+    else:
+        target_url = f"https://www.youtube.com/@{query}/videos"
+
+    ydl_opts = get_base_ydl_opts(cookie_source, cookie_file)
+    ydl_opts.update({
+        'extract_flat': True,
+        'skip_download': True,
+        'playlistend': max_results,
+    })
+    
+    videos = []
+    channel_name = query
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                info = ydl.extract_info(target_url, download=False)
+            except Exception:
+                info = None
+
+            if not info or not info.get('entries'):
+                # Fallback: buscar canal por nombre
+                search_query = f"ytsearch{max_results}:{query}"
+                info = ydl.extract_info(search_query, download=False)
+            
+            if info:
+                channel_name = info.get('uploader') or info.get('channel') or info.get('title') or query
+                entries = info.get('entries', [])
+                for entry in entries:
+                    if not entry:
+                        continue
+                    duration = entry.get('duration', 0)
+                    mins, secs = divmod(int(duration) if duration else 0, 60)
+                    dur_str = f"{mins}:{secs:02d}" if duration else "Desconocido"
+                    
+                    vid_id = entry.get('id')
+                    vid_url = entry.get('url') or f"https://www.youtube.com/watch?v={vid_id}"
+                    
+                    videos.append({
+                        'id': vid_id,
+                        'title': entry.get('title', 'Sin título'),
+                        'url': vid_url,
+                        'uploader': entry.get('uploader') or entry.get('channel') or channel_name,
+                        'duration_str': dur_str,
+                        'thumbnail': entry.get('thumbnail')
+                    })
+                    
+        return {
+            'channel_name': channel_name,
+            'videos': videos,
+            'count': len(videos)
+        }
+    except Exception as e:
+        return {'channel_name': query, 'videos': [], 'error': str(e)}
+
+class BatchAudioDownloader:
+    def __init__(self, output_dir, items, audio_format="m4a", audio_quality="192", cookie_source=None, cookie_file=None, progress_callback=None, finished_callback=None, error_callback=None):
+        self.output_dir = output_dir
+        self.items = items
+        self.audio_format = audio_format
+        self.audio_quality = audio_quality
+        self.cookie_source = cookie_source
+        self.cookie_file = cookie_file
+        self.progress_callback = progress_callback
+        self.finished_callback = finished_callback
+        self.error_callback = error_callback
+        self.is_cancelled = False
+        self._thread = None
+        self._current_downloader = None
+
+    def _batch_task(self):
+        total = len(self.items)
+        completed = 0
+        
+        for idx, item in enumerate(self.items, 1):
+            if self.is_cancelled:
+                break
+                
+            url = item['url']
+            title = item.get('title', f'Audio {idx}')
+            
+            done_event = threading.Event()
+            success = [False]
+            err_box = [None]
+            
+            def item_progress(item_percent, item_msg):
+                overall_percent = ((idx - 1) + item_percent) / total
+                msg = f"[{idx}/{total}] {title}: {item_msg}"
+                if self.progress_callback:
+                    self.progress_callback(overall_percent, msg)
+                    
+            def item_finished(t, p):
+                success[0] = True
+                done_event.set()
+                
+            def item_error(e):
+                err_box[0] = e
+                done_event.set()
+                
+            self._current_downloader = AudioDownloader(
+                output_dir=self.output_dir,
+                audio_format=self.audio_format,
+                audio_quality=self.audio_quality,
+                cookie_source=self.cookie_source,
+                cookie_file=self.cookie_file,
+                progress_callback=item_progress,
+                finished_callback=item_finished,
+                error_callback=item_error
+            )
+            self._current_downloader.start_download(url)
+            done_event.wait()
+            
+            if self.is_cancelled:
+                break
+                
+            if success[0]:
+                completed += 1
+                
+        if self.is_cancelled:
+            if self.error_callback:
+                self.error_callback("Descarga por lote cancelada por el usuario.")
+        else:
+            if self.finished_callback:
+                self.finished_callback(completed, total, self.output_dir)
+
+    def start_download(self):
+        self.is_cancelled = False
+        self._thread = threading.Thread(target=self._batch_task, daemon=True)
+        self._thread.start()
+
+    def cancel(self):
+        self.is_cancelled = True
+        if self._current_downloader:
+            self._current_downloader.cancel()
 
 class AudioDownloader:
     def __init__(self, output_dir, audio_format="m4a", audio_quality="192", cookie_source=None, cookie_file=None, progress_callback=None, finished_callback=None, error_callback=None):
@@ -252,6 +400,10 @@ class AudioDownloader:
                 err_msg = "YouTube requiere autenticación para evitar bloqueos de robot. Inicia sesión en YouTube desde tu navegador (Firefox, Chrome o Edge) y selecciona ese navegador en 'Autenticación YouTube'."
             elif "Descarga cancelada" in err_msg:
                 err_msg = "Descarga cancelada por el usuario"
+            elif "timed out" in err_msg.lower() or "read timeout" in err_msg.lower() or "connection" in err_msg.lower():
+                err_msg = ("La conexión al servidor de descarga de YouTube fue bloqueada o es muy lenta. "
+                           "Esto suele ocurrir por restricciones de red (ej. Forticlient). "
+                           "Prueba en otra red o contacta a soporte de TI.")
 
             if self.error_callback:
                 self.error_callback(err_msg)
